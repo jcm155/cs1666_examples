@@ -1,0 +1,206 @@
+extern crate sdl_rust;
+
+use std::collections::HashSet;
+
+use sdl2::pixels::Color;
+use sdl2::rect::Rect;
+use sdl2::event::Event;
+use sdl2::keyboard::Keycode;
+use sdl2::image::LoadTexture;
+use sdl2::render::Texture;
+
+use sdl_rust::SDLCore;
+use sdl_rust::Demo;
+
+const TITLE: &str = "SDL14 Top-down scrolling";
+
+const CAM_W: u32 = 640;
+const CAM_H: u32 = 480;
+
+const BG_W: u32 = 1920;
+const BG_H: u32 = 1080;
+
+const TILE_SIZE: u32 = 100;
+
+const SPEED_LIMIT: i32 = 5;
+const ACCEL_RATE: i32 = 1;
+
+enum PlayerType {
+	Bird,
+	Plane,
+	UFO,
+	Chopper,
+}
+
+struct Player<'a> {
+	pos: Rect,
+	src: Rect,
+	texture: Texture<'a>,
+}
+
+impl<'a> Player<'a> {
+	fn new(t: PlayerType, pos: Rect, texture: Texture<'a>) -> Player {
+		let (x, y) = match t {
+			PlayerType::Bird => (0, 0),
+			PlayerType::Plane => (TILE_SIZE, 0),
+			PlayerType::UFO => (0, TILE_SIZE),
+			PlayerType::Chopper => (TILE_SIZE, TILE_SIZE),
+		};
+
+		let src = Rect::new(x as i32, y as i32, TILE_SIZE, TILE_SIZE);
+		Player {
+			pos,
+			src,
+			texture,
+		}
+	}
+
+	fn x(&self) -> i32 {
+		self.pos.x()
+	}
+
+	fn y(&self) -> i32 {
+		self.pos.y()
+	}
+
+	fn width(&self) -> u32 {
+		self.pos.width()
+	}
+
+	fn height(&self) -> u32 {
+		self.pos.height()
+	}
+
+	fn update_pos(&mut self, vel: (i32, i32), x_bounds: (i32, i32), y_bounds: (i32, i32)) {
+		self.pos.set_x((self.pos.x() + vel.0).clamp(x_bounds.0, x_bounds.1));
+		self.pos.set_y((self.pos.y() + vel.1).clamp(y_bounds.0, y_bounds.1));
+	}
+
+	fn src(&self) -> Rect {
+		self.src
+	}
+
+	fn texture(&self) -> &Texture {
+		&self.texture
+	}
+}
+
+fn resist(vel: i32, deltav: i32) -> i32 {
+	if deltav == 0 {
+		if vel > 0 {
+			-1
+		}
+		else if vel < 0 {
+			1
+		}
+		else {
+			deltav
+		}
+	}
+	else {
+		deltav
+	}
+}
+
+pub struct SDL14 {
+	core: SDLCore,
+}
+
+impl Demo for SDL14 {
+	fn init() -> Result<Self, String> {
+		let core = SDLCore::init(TITLE, true, CAM_W, CAM_H)?;
+		Ok(SDL14{ core })
+	}
+
+	fn run(&mut self) -> Result<(), String> {
+		let texture_creator = self.core.wincan.texture_creator();
+
+		// bg image is much larger than camera window, so we'll only be
+		// drawing a selection at any given time
+		let bg = texture_creator.load_texture("images/bg.png")?;
+
+		let mut p = Player::new(
+			PlayerType::Chopper,
+			Rect::new(
+				(BG_W/2 - TILE_SIZE/2) as i32,
+				(BG_H/2 - TILE_SIZE/2) as i32,
+				TILE_SIZE,
+				TILE_SIZE,
+			),
+			texture_creator.load_texture("images/birds.png")?,
+		);
+
+		let mut x_vel = 0;
+		let mut y_vel = 0;
+
+		'gameloop: loop {
+			for event in self.core.event_pump.poll_iter() {
+				match event {
+					Event::Quit{..} | Event::KeyDown{keycode: Some(Keycode::Escape), ..} => break 'gameloop,
+					_ => {},
+				}
+			}
+
+			let keystate: HashSet<Keycode> = self.core.event_pump
+				.keyboard_state()
+				.pressed_scancodes()
+				.filter_map(Keycode::from_scancode)
+				.collect();
+
+			let mut x_deltav = 0;
+			let mut y_deltav = 0;
+			if keystate.contains(&Keycode::W) {
+				y_deltav -= ACCEL_RATE;
+			}
+			if keystate.contains(&Keycode::A) {
+				x_deltav -= ACCEL_RATE;
+			}
+			if keystate.contains(&Keycode::S) {
+				y_deltav += ACCEL_RATE;
+			}
+			if keystate.contains(&Keycode::D) {
+				x_deltav += ACCEL_RATE;
+			}
+			x_deltav = resist(x_vel, x_deltav);
+			y_deltav = resist(y_vel, y_deltav);
+			x_vel = (x_vel + x_deltav).clamp(-SPEED_LIMIT, SPEED_LIMIT);
+			y_vel = (y_vel + y_deltav).clamp(-SPEED_LIMIT, SPEED_LIMIT);
+
+			p.update_pos((x_vel, y_vel), (0, (BG_W - TILE_SIZE) as i32), (0, (BG_H - TILE_SIZE) as i32));
+
+			// Determine the current portion of the background to draw
+			let cur_bg = Rect::new(
+				((p.x() + ((p.width() / 2) as i32)) - ((CAM_W / 2) as i32)).clamp(0, (BG_W - CAM_W) as i32),
+				((p.y() + ((p.height() / 2) as i32)) - ((CAM_H / 2) as i32)).clamp(0, (BG_H - CAM_H) as i32),
+				CAM_W,
+				CAM_H,
+			);
+
+			// Convert player's map position to be camera-relative
+			let player_cam_pos = Rect::new(
+				p.x() - cur_bg.x(),
+				p.y() - cur_bg.y(),
+				TILE_SIZE,
+				TILE_SIZE,
+			);
+
+			self.core.wincan.set_draw_color(Color::BLACK);
+			self.core.wincan.clear();
+
+			// Draw subset of bg
+			self.core.wincan.copy(&bg, cur_bg, None)?;
+
+			// Draw player
+			self.core.wincan.copy(p.texture(), p.src(), player_cam_pos)?;
+
+			self.core.wincan.present();
+		}
+
+		// Out of game loop, return Ok
+		Ok(())
+	}
+}
+
+fn main() {
+	sdl_rust::runner(TITLE, SDL14::init);
+}
